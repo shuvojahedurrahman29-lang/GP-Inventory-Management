@@ -48,7 +48,6 @@ import {
 import { db, auth } from './firebase';
 import { Product, Staff, Transaction, TransactionType, PaymentType } from './types';
 import { generatePONumber } from './utils/poGenerator';
-import { ErrorBoundary } from './components/ErrorBoundary';
 import { format, isSameDay, parseISO, isWithinInterval, startOfDay, endOfDay } from 'date-fns';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
@@ -188,6 +187,7 @@ const Card = ({ children, className, onClick }: { children: React.ReactNode; cla
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'staff' | 'reports' | 'utilities'>('dashboard');
   
@@ -297,10 +297,20 @@ export default function App() {
   }, [selectedProduct, transactionQty]);
 
   const handleLogin = async () => {
+    setLoginError(null);
     try {
       await signInWithPopup(auth, new GoogleAuthProvider());
-    } catch (error) {
+    } catch (error: any) {
       console.error('Login failed', error);
+      let message = 'Login failed. Please try again.';
+      if (error.code === 'auth/unauthorized-domain') {
+        message = 'This domain is not authorized in Firebase. Please add gp-inventory.vercel.app to Authorized Domains in Firebase Console.';
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        message = 'Login popup was closed before completion.';
+      } else if (error.message) {
+        message = error.message;
+      }
+      setLoginError(message);
     }
   };
 
@@ -699,6 +709,14 @@ export default function App() {
           </div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Suzun Enterprise</h1>
           <p className="text-gray-500 mb-8">Distribution Suite Management System</p>
+          
+          {loginError && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-start gap-3 text-left">
+              <AlertCircle className="text-red-600 shrink-0 mt-0.5" size={18} />
+              <p className="text-sm text-red-800">{loginError}</p>
+            </div>
+          )}
+
           <Button onClick={handleLogin} className="w-full py-4 text-lg">
             Sign in with Google
           </Button>
