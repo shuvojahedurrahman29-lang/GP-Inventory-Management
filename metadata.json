@@ -1,0 +1,5 @@
+{
+  "name": "M/S Suzun Enterprise Distribution Suite",
+  "description": "A high-performance inventory management system for GP distribution with automated stock sync, sequential PO generation, and real-time data integrity.",
+  "requestFramePermissions": []
+}

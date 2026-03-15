@@ -1,0 +1,105 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: products
+    // Fields: name (string), category (string), totalStock (number), unit (string)
+    //
+    // Collection: staff
+    // Fields: name (string), designation (string), mobile (string), holdings (list of objects)
+    //
+    // Collection: transactions
+    // Fields: poNumber (string), staffId (string), staffName (string), productId (string), 
+    //         productName (string), productHead (string), quantity (number), amount (number),
+    //         paymentType (string), type (string), serialNumbers (list), timestamp (string), remarks (string)
+    //
+    // Collection: counters
+    // Fields: lastValue (number), year (number)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "shuvojahedurrahman29@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll(['name', 'totalStock', 'unitPrice']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.totalStock is number && data.totalStock >= 0 &&
+             data.unitPrice is number && data.unitPrice >= 0;
+    }
+
+    function isValidStaff(data) {
+      return data.keys().hasAll(['name', 'mobile']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.mobile is string && data.mobile.matches('^[0-9]{11}$') &&
+             (!('holdings' in data) || data.holdings is list);
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['poNumber', 'staffId', 'productId', 'quantity', 'type', 'timestamp']) &&
+             data.poNumber is string && data.poNumber.size() > 0 &&
+             data.quantity is number && data.quantity > 0 &&
+             data.type in ['ISSUE', 'RETURN'] &&
+             data.timestamp is string &&
+             (!('amount' in data) || data.amount is number) &&
+             (!('paymentType' in data) || data.paymentType in ['Cash', 'Credit']) &&
+             (!('productHead' in data) || data.productHead is string) &&
+             (!('remarks' in data) || data.remarks is string);
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'photoURL']) &&
+             data.uid == request.auth.uid &&
+             data.photoURL is string && data.photoURL.size() < 1048576;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /products/{productId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidProduct(request.resource.data);
+    }
+
+    match /staff/{staffId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidStaff(request.resource.data);
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
+      allow update, delete: if isAdmin();
+    }
+
+    match /counters/{counterId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated(); // Needed for PO generation increment
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    match /userProfiles/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && request.auth.uid == userId && isValidUserProfile(request.resource.data);
+    }
+  }
+}

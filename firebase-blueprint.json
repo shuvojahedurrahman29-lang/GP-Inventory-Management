@@ -1,0 +1,108 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Master stock items available for distribution",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "totalStock": { "type": "number" },
+        "unit": { "type": "string" },
+        "unitPrice": { "type": "number" }
+      },
+      "required": ["name", "totalStock", "unitPrice"]
+    },
+    "Staff": {
+      "title": "Staff",
+      "description": "Staff members who hold stock",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "designation": { "type": "string" },
+        "mobile": { "type": "string", "description": "11-digit GP Mobile Number" },
+        "holdings": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "productId": { "type": "string" },
+              "productName": { "type": "string" },
+              "qtyHeld": { "type": "number" },
+              "serialNumbers": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      },
+      "required": ["name", "mobile"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Record of stock issuance or return",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "poNumber": { "type": "string" },
+        "staffId": { "type": "string" },
+        "staffName": { "type": "string" },
+        "productId": { "type": "string" },
+        "productName": { "type": "string" },
+        "productHead": { "type": "string" },
+        "quantity": { "type": "number" },
+        "amount": { "type": "number" },
+        "paymentType": { "type": "string", "enum": ["Cash", "Credit"] },
+        "type": { "type": "string", "enum": ["ISSUE", "RETURN"] },
+        "serialNumbers": { "type": "array", "items": { "type": "string" } },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "remarks": { "type": "string" }
+      },
+      "required": ["poNumber", "staffId", "productId", "quantity", "type", "timestamp"]
+    },
+    "Counter": {
+      "title": "Counter",
+      "description": "Sequential counters for PO numbers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "lastValue": { "type": "number" },
+        "year": { "type": "number" }
+      },
+      "required": ["lastValue", "year"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Custom user profile settings",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "photoURL": { "type": "string", "description": "Base64 encoded profile picture" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "photoURL"]
+    }
+  },
+  "firestore": {
+    "products": {
+      "schema": "Product",
+      "description": "Master inventory list"
+    },
+    "staff": {
+      "schema": "Staff",
+      "description": "Staff profiles and their current holdings"
+    },
+    "transactions": {
+      "schema": "Transaction",
+      "description": "History of all stock movements"
+    },
+    "counters": {
+      "schema": "Counter",
+      "description": "PO number counters"
+    },
+    "userProfiles": {
+      "schema": "UserProfile",
+      "description": "Custom user profile settings"
+    }
+  }
+}
