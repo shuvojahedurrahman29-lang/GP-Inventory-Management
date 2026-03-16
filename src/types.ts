@@ -47,17 +47,3 @@ export interface Counter {
   lastValue: number;
   year: number;
 }
-
-export interface CartItem {
-  id: string;
-  productId: string;
-  productName: string;
-  quantity: number;
-  serialNumbers: string[];
-  amount: number;
-  productHead?: string;
-  paymentType: PaymentType;
-  remarks?: string;
-  unitPrice: number;
-  category: string;
-}
