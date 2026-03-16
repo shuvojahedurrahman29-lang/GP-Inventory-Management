@@ -46,7 +46,7 @@ import {
   User
 } from 'firebase/auth';
 import { db, auth } from './firebase';
-import { Product, Staff, Transaction, TransactionType, PaymentType } from './types';
+import { Product, Staff, Transaction, TransactionType, PaymentType, CartItem } from './types';
 import { generatePONumber } from './utils/poGenerator';
 import { format, isSameDay, parseISO, isWithinInterval, startOfDay, endOfDay } from 'date-fns';
 import * as XLSX from 'xlsx';
@@ -220,6 +220,7 @@ export default function App() {
   const [reportEndDate, setReportEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [isEditingName, setIsEditingName] = useState(false);
   const [newName, setNewName] = useState(user?.displayName || '');
+  const [cart, setCart] = useState<CartItem[]>([]);
 
   useEffect(() => {
     if (user) {
@@ -408,25 +409,13 @@ export default function App() {
   };
 
   const processTransaction = async () => {
-    if (!selectedStaff || !selectedProduct) {
-      alert('Please select staff and product.');
+    if (!selectedStaff) {
+      alert('Please select staff.');
       return;
     }
 
-    if (transactionQty <= 0) {
-      alert('Quantity must be greater than zero.');
-      return;
-    }
-
-    if (transactionType === 'ISSUE' && selectedProduct.totalStock < transactionQty) {
-      alert('Insufficient Stock in master inventory.');
-      return;
-    }
-
-    // Check staff holdings for returns
-    const staffHolding = selectedStaff.holdings?.find(h => h.productId === selectedProduct.id);
-    if (transactionType === 'RETURN' && (!staffHolding || staffHolding.qtyHeld < transactionQty)) {
-      alert('Staff does not hold enough quantity to return.');
+    if (cart.length === 0) {
+      alert('Cart is empty. Please add products to the cart first.');
       return;
     }
 
@@ -435,46 +424,51 @@ export default function App() {
       const timestamp = new Date().toISOString();
 
       await runTransaction(db, async (transaction) => {
-        const productRef = doc(db, 'products', selectedProduct.id);
         const staffRef = doc(db, 'staff', selectedStaff.id);
-        
-        const prodDoc = await transaction.get(productRef);
         const staffDoc = await transaction.get(staffRef);
+        if (!staffDoc.exists()) throw new Error('Staff not found');
 
-        if (!prodDoc.exists() || !staffDoc.exists()) throw new Error('Document not found');
+        let newStaffHoldings = [...(staffDoc.data().holdings || [])];
 
-        const currentProdStock = prodDoc.data().totalStock;
-        const currentStaffHoldings = staffDoc.data().holdings || [];
+        for (const item of cart) {
+          const productRef = doc(db, 'products', item.productId);
+          const prodDoc = await transaction.get(productRef);
+          if (!prodDoc.exists()) throw new Error(`Product ${item.productName} not found`);
 
-        let newProdStock = currentProdStock;
-        let newStaffHoldings = [...currentStaffHoldings];
+          const currentProdStock = prodDoc.data().totalStock;
+          let newProdStock = currentProdStock;
 
-        const holdingIndex = newStaffHoldings.findIndex(h => h.productId === selectedProduct.id);
+          const holdingIndex = newStaffHoldings.findIndex(h => h.productId === item.productId);
 
-        if (transactionType === 'ISSUE') {
-          newProdStock -= transactionQty;
-          if (holdingIndex > -1) {
-            newStaffHoldings[holdingIndex] = {
-              ...newStaffHoldings[holdingIndex],
-              qtyHeld: newStaffHoldings[holdingIndex].qtyHeld + transactionQty,
-              serialNumbers: [...newStaffHoldings[holdingIndex].serialNumbers, ...serials]
-            };
+          if (transactionType === 'ISSUE') {
+            if (currentProdStock < item.quantity) {
+              throw new Error(`Insufficient stock for ${item.productName}`);
+            }
+            newProdStock -= item.quantity;
+            if (holdingIndex > -1) {
+              newStaffHoldings[holdingIndex] = {
+                ...newStaffHoldings[holdingIndex],
+                qtyHeld: newStaffHoldings[holdingIndex].qtyHeld + item.quantity,
+                serialNumbers: [...newStaffHoldings[holdingIndex].serialNumbers, ...item.serialNumbers]
+              };
+            } else {
+              newStaffHoldings.push({
+                productId: item.productId,
+                productName: item.productName,
+                qtyHeld: item.quantity,
+                serialNumbers: item.serialNumbers
+              });
+            }
           } else {
-            newStaffHoldings.push({
-              productId: selectedProduct.id,
-              productName: selectedProduct.name,
-              qtyHeld: transactionQty,
-              serialNumbers: serials
-            });
-          }
-        } else {
-          newProdStock += transactionQty;
-          if (holdingIndex > -1) {
-            const updatedQty = newStaffHoldings[holdingIndex].qtyHeld - transactionQty;
-            const updatedSerials = newStaffHoldings[holdingIndex].serialNumbers.filter(s => !serials.includes(s));
+            // RETURN
+            if (holdingIndex === -1 || newStaffHoldings[holdingIndex].qtyHeld < item.quantity) {
+              throw new Error(`Staff does not hold enough ${item.productName} to return`);
+            }
+            newProdStock += item.quantity;
+            const updatedQty = newStaffHoldings[holdingIndex].qtyHeld - item.quantity;
+            const updatedSerials = newStaffHoldings[holdingIndex].serialNumbers.filter(s => !item.serialNumbers.includes(s));
             
             if (updatedQty <= 0) {
-              // Zero-Stock Wipe
               newStaffHoldings.splice(holdingIndex, 1);
             } else {
               newStaffHoldings[holdingIndex] = {
@@ -484,45 +478,41 @@ export default function App() {
               };
             }
           }
+
+          // Update product stock
+          transaction.update(productRef, { totalStock: newProdStock });
+
+          // Create transaction record
+          const transRef = doc(collection(db, 'transactions'));
+          transaction.set(transRef, {
+            poNumber,
+            staffId: selectedStaff.id,
+            staffName: selectedStaff.name,
+            productId: item.productId,
+            productName: item.productName,
+            productHead: item.productHead || '',
+            quantity: item.quantity,
+            amount: item.amount,
+            paymentType: item.paymentType,
+            type: transactionType,
+            serialNumbers: item.serialNumbers,
+            timestamp,
+            remarks: item.remarks || ''
+          });
         }
 
-        transaction.update(productRef, { totalStock: newProdStock });
+        // Update staff holdings
         transaction.update(staffRef, { holdings: newStaffHoldings });
-        
-        const transRef = doc(collection(db, 'transactions'));
-        transaction.set(transRef, {
-          poNumber,
-          staffId: selectedStaff.id,
-          staffName: selectedStaff.name,
-          productId: selectedProduct.id,
-          productName: selectedProduct.name,
-          productHead: productHead || selectedProduct.category,
-          quantity: transactionQty,
-          amount: transactionAmount,
-          paymentType: paymentType,
-          type: transactionType,
-          serialNumbers: serials,
-          timestamp,
-          remarks: remarks || (serials.length > 0 ? `Serials: ${serials.join(', ')}` : '')
-        });
       });
 
-      generateReceiptPDF(
-        poNumber, 
-        selectedStaff, 
-        selectedProduct, 
-        serials, 
-        transactionQty, 
-        transactionAmount,
-        paymentType,
-        productHead || selectedProduct.category,
-        transactionType, 
-        timestamp,
-        remarks
-      );
+      // Generate combined receipt
+      generateReceiptPDF(poNumber, selectedStaff, cart, transactionType, timestamp);
+      
+      alert(`Transaction ${poNumber} processed successfully!`);
       setIsTransactionModalOpen(false);
       resetTransactionForm();
-    } catch (err) {
+    } catch (err: any) {
+      alert(err.message || 'Transaction failed');
       handleFirestoreError(err, OperationType.WRITE, 'transactions');
     }
   };
@@ -537,20 +527,55 @@ export default function App() {
     setPaymentType('Cash');
     setProductHead('');
     setRemarks('');
+    setCart([]);
+  };
+
+  const addToCart = () => {
+    if (!selectedProduct) {
+      alert('Please select a product first.');
+      return;
+    }
+    if (transactionQty <= 0) {
+      alert('Quantity must be greater than zero.');
+      return;
+    }
+
+    const newItem: CartItem = {
+      id: Math.random().toString(36).substr(2, 9),
+      productId: selectedProduct.id,
+      productName: selectedProduct.name,
+      quantity: transactionQty,
+      serialNumbers: [...serials],
+      amount: transactionAmount,
+      productHead: productHead,
+      paymentType: paymentType,
+      remarks: remarks,
+      unitPrice: selectedProduct.unitPrice,
+      category: selectedProduct.category
+    };
+
+    setCart([...cart, newItem]);
+    
+    // Reset individual item fields but keep staff
+    setSelectedProduct(null);
+    setTransactionQty(1);
+    setTransactionAmount(0);
+    setProductHead('');
+    setRemarks('');
+    setSerials([]);
+    setSerialInput('');
+  };
+
+  const removeFromCart = (id: string) => {
+    setCart(cart.filter(item => item.id !== id));
   };
 
   const generateReceiptPDF = (
     po: string, 
     staff: Staff, 
-    product: Product, 
-    serials: string[], 
-    qty: number,
-    amount: number,
-    paymentType: string,
-    head: string,
+    items: CartItem[],
     type: TransactionType,
-    timestamp: string,
-    remarks?: string
+    timestamp: string
   ) => {
     const doc = new jsPDF() as any;
     const dateStr = format(parseISO(timestamp), 'dd MMM yyyy, hh:mm a');
@@ -586,15 +611,13 @@ export default function App() {
     doc.text(`Type: ${type}`, 140, 63);
 
     // Table
-    const tableData = [
-      [
-        head || product.category,
-        product.name,
-        qty.toString(),
-        amount.toFixed(2),
-        remarks || (serials.length > 0 ? `Serials: ${serials.join(', ')}` : 'N/A')
-      ]
-    ];
+    const tableData = items.map(item => [
+      item.productHead || item.category,
+      item.productName,
+      item.quantity.toString(),
+      item.amount.toFixed(2),
+      item.remarks || (item.serialNumbers.length > 0 ? `Serials: ${item.serialNumbers.join(', ')}` : 'N/A')
+    ]);
 
     autoTable(doc, {
       startY: 75,
@@ -607,14 +630,15 @@ export default function App() {
     });
 
     const finalY = (doc as any).lastAutoTable.finalY || 100;
+    const totalAmount = items.reduce((acc, item) => acc + item.amount, 0);
 
     // Footer
     doc.setFontSize(12);
     doc.setFont('helvetica', 'bold');
-    doc.text(`Total Amount: BDT ${amount.toFixed(2)}`, 140, finalY + 15);
+    doc.text(`Total Amount: BDT ${totalAmount.toFixed(2)}`, 140, finalY + 15);
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Payment Type: ${paymentType}`, 140, finalY + 22);
+    doc.text(`Payment Type: ${items[0]?.paymentType || 'N/A'}`, 140, finalY + 22);
 
     doc.setFontSize(9);
     doc.setTextColor(150);
@@ -1127,20 +1151,26 @@ export default function App() {
                                 <button 
                                   onClick={() => {
                                     const s = staff.find(st => st.id === t.staffId);
-                                    const p = products.find(pr => pr.id === t.productId);
-                                    if (s && p) generateReceiptPDF(
-                                      t.poNumber, 
-                                      s, 
-                                      p, 
-                                      t.serialNumbers, 
-                                      t.quantity, 
-                                      t.amount || 0,
-                                      t.paymentType || 'Cash',
-                                      t.productHead || p.category,
-                                      t.type, 
-                                      t.timestamp,
-                                      t.remarks
-                                    );
+                                    if (s) {
+                                      const poTransactions = transactions.filter(tr => tr.poNumber === t.poNumber);
+                                      const cartItems: CartItem[] = poTransactions.map(tr => {
+                                        const p = products.find(pr => pr.id === tr.productId);
+                                        return {
+                                          id: tr.id,
+                                          productId: tr.productId,
+                                          productName: tr.productName,
+                                          quantity: tr.quantity,
+                                          serialNumbers: tr.serialNumbers,
+                                          amount: tr.amount,
+                                          productHead: tr.productHead,
+                                          paymentType: tr.paymentType,
+                                          remarks: tr.remarks,
+                                          unitPrice: p?.unitPrice || 0,
+                                          category: p?.category || ''
+                                        };
+                                      });
+                                      generateReceiptPDF(t.poNumber, s, cartItems, t.type, t.timestamp);
+                                    }
                                   }}
                                   className="p-2 bg-[#E21F26] text-white rounded-lg hover:bg-red-700 transition-all shadow-sm"
                                 >
@@ -1435,106 +1465,153 @@ export default function App() {
               </select>
             </div>
 
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-1">Select Product</label>
-              <select 
-                className="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none"
-                onChange={(e) => setSelectedProduct(products.find(p => p.id === e.target.value) || null)}
-                value={selectedProduct?.id || ''}
-              >
-                <option value="">-- Choose Product --</option>
-                {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.totalStock})</option>)}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-1">Product Head (Optional)</label>
-              <input 
-                value={productHead}
-                onChange={(e) => setProductHead(e.target.value)}
-                placeholder="e.g. SIM KIT"
-                className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:border-[#E21F26] focus:ring-1 focus:ring-[#E21F26] outline-none"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
+            {/* Product Selection Form (Add to Cart) */}
+            <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100 space-y-4">
+              <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                <Plus size={16} className="text-[#E21F26]" />
+                Add Product to {transactionType === 'ISSUE' ? 'Issuance' : 'Return'} List
+              </h3>
+              
               <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Quantity</label>
-                <input 
-                  type="number"
-                  value={transactionQty}
-                  onChange={(e) => setTransactionQty(Number(e.target.value))}
-                  min={1}
-                  className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:border-[#E21F26] focus:ring-1 focus:ring-[#E21F26] outline-none"
-                />
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Product</label>
+                <select 
+                  className="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none"
+                  onChange={(e) => setSelectedProduct(products.find(p => p.id === e.target.value) || null)}
+                  value={selectedProduct?.id || ''}
+                >
+                  <option value="">-- Choose Product --</option>
+                  {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.totalStock})</option>)}
+                </select>
               </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Quantity</label>
+                  <input 
+                    type="number"
+                    value={transactionQty}
+                    onChange={(e) => setTransactionQty(Number(e.target.value))}
+                    min={1}
+                    className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:border-[#E21F26] focus:ring-1 focus:ring-[#E21F26] outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Amount (BDT)</label>
+                  <input 
+                    type="number"
+                    value={transactionAmount}
+                    onChange={(e) => setTransactionAmount(Number(e.target.value))}
+                    min={0}
+                    className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:border-[#E21F26] focus:ring-1 focus:ring-[#E21F26] outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Product Head</label>
+                  <input 
+                    value={productHead}
+                    onChange={(e) => setProductHead(e.target.value)}
+                    placeholder="e.g. SIM, Device"
+                    className="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Payment Type</label>
+                  <select 
+                    value={paymentType}
+                    onChange={(e) => setPaymentType(e.target.value as PaymentType)}
+                    className="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none"
+                  >
+                    <option value="Cash">Cash</option>
+                    <option value="Credit">Credit</option>
+                  </select>
+                </div>
+              </div>
+
               <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Amount (BDT)</label>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Remarks</label>
                 <input 
-                  type="number"
-                  value={transactionAmount}
-                  onChange={(e) => setTransactionAmount(Number(e.target.value))}
-                  min={0}
-                  className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:border-[#E21F26] focus:ring-1 focus:ring-[#E21F26] outline-none"
+                  value={remarks}
+                  onChange={(e) => setRemarks(e.target.value)}
+                  placeholder="Optional notes..."
+                  className="w-full px-4 py-2 rounded-xl border border-gray-200 outline-none"
                 />
               </div>
-            </div>
 
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-1">Payment Type</label>
-              <div className="flex gap-4">
-                {['Cash', 'Credit'].map(type => (
-                  <label key={type} className="flex items-center gap-2 cursor-pointer">
-                    <input 
-                      type="radio" 
-                      name="paymentType" 
-                      checked={paymentType === type}
-                      onChange={() => setPaymentType(type as PaymentType)}
-                      className="text-[#E21F26] focus:ring-[#E21F26]"
-                    />
-                    <span className="text-sm font-medium text-gray-700">{type}</span>
-                  </label>
-                ))}
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Serials</label>
+                <div className="flex gap-2 mb-2">
+                  <input 
+                    value={serialInput}
+                    onChange={(e) => setSerialInput(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && addSerial()}
+                    placeholder="Scan or type serial..."
+                    className="flex-1 px-4 py-2 rounded-xl border border-gray-200 outline-none"
+                  />
+                  <Button onClick={addSerial} variant="secondary">Add</Button>
+                </div>
+                <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto p-2 bg-white rounded-xl border border-gray-100">
+                  {serials.length === 0 && <p className="text-[10px] text-gray-400 italic">No serials added</p>}
+                  {serials.map(s => (
+                    <span key={s} className="px-2 py-0.5 bg-gray-50 border border-gray-100 rounded text-[10px] font-medium flex items-center gap-1">
+                      {s}
+                      <button onClick={() => setSerials(serials.filter(x => x !== s))} className="text-gray-400 hover:text-red-500">
+                        <X size={10} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
               </div>
+
+              <Button onClick={addToCart} variant="secondary" className="w-full">
+                Add to List
+              </Button>
             </div>
 
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-1">Remarks</label>
-              <textarea 
-                value={remarks}
-                onChange={(e) => setRemarks(e.target.value)}
-                placeholder="Additional notes..."
-                className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:border-[#E21F26] focus:ring-1 focus:ring-[#E21F26] outline-none h-20 resize-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-1">Add Serial Numbers</label>
-              <div className="flex gap-2 mb-2">
-                <input 
-                  value={serialInput}
-                  onChange={(e) => setSerialInput(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && addSerial()}
-                  placeholder="Scan or type serial..."
-                  className="flex-1 px-4 py-2 rounded-xl border border-gray-200 outline-none"
-                />
-                <Button onClick={addSerial} variant="secondary">Add</Button>
-              </div>
-              <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto p-2 bg-gray-50 rounded-xl">
-                {serials.length === 0 && <p className="text-xs text-gray-400 italic">No serials added yet</p>}
-                {serials.map(s => (
-                  <span key={s} className="px-2 py-1 bg-white border border-gray-200 rounded-lg text-xs font-medium flex items-center gap-1">
-                    {s}
-                    <button onClick={() => setSerials(serials.filter(x => x !== s))} className="text-gray-400 hover:text-red-500">
-                      <X size={12} />
-                    </button>
+            {/* Cart / List View */}
+            {cart.length > 0 && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                  <FileText size={16} className="text-[#E21F26]" />
+                  Selected Products ({cart.length})
+                </h3>
+                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  {cart.map((item) => (
+                    <div key={item.id} className="p-3 bg-white border border-gray-200 rounded-xl flex items-center justify-between group shadow-sm">
+                      <div className="flex-1">
+                        <p className="text-sm font-bold text-gray-900">{item.productName}</p>
+                        <p className="text-[10px] text-gray-500">
+                          Qty: {item.quantity} | BDT {item.amount.toFixed(2)}
+                          {item.serialNumbers.length > 0 && ` | Serials: ${item.serialNumbers.length}`}
+                        </p>
+                      </div>
+                      <button 
+                        onClick={() => removeFromCart(item.id)}
+                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                
+                <div className="p-3 bg-gray-900 text-white rounded-xl flex justify-between items-center">
+                  <span className="text-xs font-bold uppercase tracking-wider">Total Amount</span>
+                  <span className="text-lg font-black">
+                    BDT {cart.reduce((acc, item) => acc + item.amount, 0).toFixed(2)}
                   </span>
-                ))}
+                </div>
               </div>
-            </div>
+            )}
 
-            <Button onClick={processTransaction} className="w-full py-4">
-              Process {transactionType} & Generate Receipt
+            <Button 
+              onClick={processTransaction} 
+              className="w-full py-4"
+              disabled={cart.length === 0}
+            >
+              Confirm {transactionType} & Generate Receipt
             </Button>
           </div>
         </Modal>
